@@ -6,9 +6,11 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
+	"github.com/gammazero/workerpool"
 	"github.com/hashicorp/terraform-config-inspect/tfconfig"
 	"github.com/hashicorp/terraform-ls/internal/terraform/discovery"
 	"github.com/hashicorp/terraform-ls/internal/terraform/exec"
@@ -22,6 +24,7 @@ type rootModuleManager struct {
 	filesystem    tfconfig.FS
 
 	syncLoading bool
+	workerPool  *workerpool.WorkerPool
 	logger      *log.Logger
 
 	// terraform discovery
@@ -40,9 +43,12 @@ func NewRootModuleManager(fs tfconfig.FS) RootModuleManager {
 
 func newRootModuleManager(fs tfconfig.FS) *rootModuleManager {
 	d := &discovery.Discovery{}
+	wp := workerpool.New(3 * runtime.NumCPU())
+
 	rmm := &rootModuleManager{
 		rms:           make([]*rootModule, 0),
 		filesystem:    fs,
+		workerPool:    wp,
 		logger:        defaultLogger,
 		tfDiscoFunc:   d.LookPath,
 		tfNewExecutor: exec.NewExecutor,
@@ -106,10 +112,11 @@ func (rmm *rootModuleManager) AddAndStartLoadingRootModule(ctx context.Context, 
 	}
 
 	rmm.logger.Printf("asynchronously loading root module %s", dir)
-	err = rm.StartLoading()
-	if err != nil {
-		return rm, err
-	}
+	rmm.workerPool.Submit(func() {
+		rm := rm
+		err := rm.load(context.Background())
+		rm.setLoadErr(err)
+	})
 
 	return rm, nil
 }
@@ -253,6 +260,7 @@ func (rmm *rootModuleManager) CancelLoading() {
 		rm.CancelLoading()
 		rmm.logger.Printf("loading cancelled for %s", rm.Path())
 	}
+	rmm.workerPool.Stop()
 }
 
 // rootModuleDirFromPath strips known lock file paths and filenames
